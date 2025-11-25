@@ -1,0 +1,26 @@
+node:internal/modules/cjs/loader:451
+      throw err;
+      ^
+
+Error: Cannot find module '/home/kavia/workspace/code-generation/mobile-notes-manager-46315-46332/notes_native_app/node_modules/jest-cli/build/index.js'. Please verify that the package.json has a valid "main" entry
+    at tryPackage (node:internal/modules/cjs/loader:443:19)
+    at Module._findPath (node:internal/modules/cjs/loader:711:18)
+    at Module._resolveFilename (node:internal/modules/cjs/loader:1126:27)
+    at Module._load (node:internal/modules/cjs/loader:981:27)
+    at Module.require (node:internal/modules/cjs/loader:1231:19)
+    at require (node:internal/modules/helpers:177:18)
+    at Object.<anonymous> (/home/kavia/workspace/code-generation/mobile-notes-manager-46315-46332/notes_native_app/node_modules/jest-cli/bin/jest.js:16:3)
+    at Module._compile (node:internal/modules/cjs/loader:1364:14)
+    at Module._extensions..js (node:internal/modules/cjs/loader:1422:10)
+    at Module.load (node:internal/modules/cjs/loader:1203:32) {
+  code: 'MODULE_NOT_FOUND',
+  path: '/home/kavia/workspace/code-generation/mobile-notes-manager-46315-46332/notes_native_app/node_modules/jest-cli/package.json',
+  requestPath: '..'
+}
+
+Node.js v18.20.8
+npm notice
+npm notice New major version of npm available! 10.8.2 -> 11.6.3
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.6.3
+npm notice To update run: npm install -g npm@11.6.3
+npm notice

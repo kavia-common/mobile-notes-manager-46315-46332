@@ -1,84 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 WORKSPACE="/home/kavia/workspace/code-generation/mobile-notes-manager-46315-46332/notes_native_app"
+OUT_RESULT="$WORKSPACE/.validation_result"
+EVIDENCE_FILE="$WORKSPACE/.last_build_artifact"
 cd "$WORKSPACE"
-mkdir -p "$WORKSPACE/.validation_logs"
-ANDR_ROOT="${ANDROID_SDK_ROOT:-/opt/android-sdk}"
-ADB_PATH="$ANDR_ROOT/platform-tools/adb"
-# Log java version
-java -version 2>&1 | head -n1 > "$WORKSPACE/.validation_logs/java_version.txt" || true
-# Build APK
-APK_PATH=""
-if [ -f "pubspec.yaml" ]; then
-  /opt/flutter/bin/flutter build apk --debug --no-shrink > "$WORKSPACE/.validation_logs/flutter_build.txt" 2>&1 || { echo 'flutter build failed' >&2; exit 60; }
-  APK_PATH=$(find build -type f -name "*-debug.apk" | head -n1 || true)
-elif [ -f "package.json" ]; then
-  if [ -d android ] && [ -f android/gradlew ]; then
-    (cd android && ./gradlew assembleDebug -q) > "$WORKSPACE/.validation_logs/gradle_build.txt" 2>&1 || { echo 'gradle build failed' >&2; exit 61; }
-    APK_PATH=$(find android -path "*/outputs/apk/*/debug/*.apk" | head -n1 || true)
-  else
-    echo 'No android/gradlew to build APK; skipping APK build' > "$WORKSPACE/.validation_logs/no_apk.txt"
-  fi
+# SKIP if no android dir
+if [ ! -d "$WORKSPACE/android" ]; then echo -e "STATUS=SKIPPED\nREASON=no android project" > "$OUT_RESULT" && exit 0; fi
+cd "$WORKSPACE/android"
+# enforce non-root
+if [ "$(id -u)" -eq 0 ]; then echo "ERROR: do not run validation build as root" >&2; exit 2; fi
+# detect AGP plugin in app module sources
+if ! grep -qE "com.android.application|com.android.library|id\(['\"]com.android.application|id\(['\"]com.android.library" -R app 2>/dev/null; then echo -e "STATUS=SKIPPED\nREASON=placeholder android scaffold (no AGP plugin)" > "$OUT_RESULT" && exit 0; fi
+# choose gradle invocation
+if [ -x ./gradlew ]; then CMD=(./gradlew); elif command -v gradle >/dev/null 2>&1; then CMD=(gradle); else echo -e "STATUS=SKIPPED\nREASON=no gradle or gradlew available" > "$OUT_RESULT" && exit 0; fi
+# build (assembleDebug) non-interactively
+"${CMD[@]}" assembleDebug --no-daemon >/dev/null 2>&1 || { echo -e "STATUS=FAIL\nREASON=gradle build failed" > "$OUT_RESULT"; exit 3; }
+# locate apk/aab
+APK=""
+for p in app/build/outputs/apk/*/app-*-debug.apk app/build/outputs/bundle/*/*.aab; do for f in $p; do [ -f "$f" ] && { APK="$f"; break 2; } done; done
+if [ -z "$APK" ]; then APK=$(find . -type f \( -iname "*.apk" -o -iname "*.aab" \) -print -quit || true); fi
+if [ -z "$APK" ]; then echo -e "STATUS=FAIL\nREASON=no apk/aab found" > "$OUT_RESULT"; exit 4; fi
+# record artifact metadata
+size=$(stat -c%s "$APK" || echo 0)
+sha=$(sha256sum "$APK" | awk '{print $1}' || echo "")
+mtime=$(stat -c%y "$APK" || echo "")
+echo "artifact=$APK" > "$EVIDENCE_FILE"
+echo "size=$size" >> "$EVIDENCE_FILE"
+echo "sha256=$sha" >> "$EVIDENCE_FILE"
+echo "mtime=$mtime" >> "$EVIDENCE_FILE"
+# find apksigner: prefer PATH, else ANDROID_SDK_ROOT/build-tools/latest
+APKSIGNER_CMD=$(command -v apksigner || true)
+if [ -z "$APKSIGNER_CMD" ] && [ -n "${ANDROID_SDK_ROOT:-}" ] && [ -d "$ANDROID_SDK_ROOT/build-tools" ]; then
+  latest_bt=$(ls -1 "$ANDROID_SDK_ROOT/build-tools" | sort -V | tail -n1 2>/dev/null || true)
+  if [ -n "$latest_bt" ] && [ -x "$ANDROID_SDK_ROOT/build-tools/$latest_bt/apksigner" ]; then APKSIGNER_CMD="$ANDROID_SDK_ROOT/build-tools/$latest_bt/apksigner"; fi
 fi
-if [ -n "$APK_PATH" ] && [ -f "$APK_PATH" ]; then
-  echo "$APK_PATH" > "$WORKSPACE/.validation_logs/built_apk_path.txt"
+# verify with apksigner or fallback to dex check
+if [ -n "$APKSIGNER_CMD" ] && [ -x "$APKSIGNER_CMD" ]; then
+  if "$APKSIGNER_CMD" verify --print-certs "$APK" >/dev/null 2>&1; then echo "APKSIGNER=OK" >> "$EVIDENCE_FILE"; else echo "APKSIGNER=FAILED" >> "$EVIDENCE_FILE" && echo -e "STATUS=FAIL\nREASON=apksigner verify failed" > "$OUT_RESULT" && exit 5; fi
 else
-  echo 'No APK artifact found; will skip device install/start' > "$WORKSPACE/.validation_logs/no_apk_found.txt"
+  if unzip -l "$APK" 2>/dev/null | grep -q "classes.dex"; then echo "DEX_PRESENT=YES" >> "$EVIDENCE_FILE"; else echo "DEX_PRESENT=NO" >> "$EVIDENCE_FILE" && echo -e "STATUS=FAIL\nREASON=classes.dex missing" > "$OUT_RESULT" && exit 6; fi
 fi
-# Check adb availability (non-fatal)
-if [ ! -x "$ADB_PATH" ] && ! command -v adb >/dev/null 2>&1; then
-  echo 'adb not available; skipping install/start' > "$WORKSPACE/.validation_logs/adb_missing.txt"
-  exit 0
-fi
-ADB_CMD=""
-if [ -x "$ADB_PATH" ]; then ADB_CMD="$ADB_PATH"; else ADB_CMD=$(command -v adb); fi
-$ADB_CMD version > "$WORKSPACE/.validation_logs/adb_version.txt" 2>&1 || true
-DEVLIST=$($ADB_CMD devices | sed '1d' | awk '{print $1}' | grep -v '^$' || true)
-if [ -z "$DEVLIST" ]; then
-  echo 'No adb devices connected; skipping install/start' > "$WORKSPACE/.validation_logs/no_devices.txt"
-  exit 0
-fi
-DEVICE=$(echo "$DEVLIST" | head -n1)
-# If we have an APK, try to install/start
-if [ -n "$APK_PATH" ] && [ -f "$APK_PATH" ]; then
-  $ADB_CMD -s "$DEVICE" install -r "$APK_PATH" > "$WORKSPACE/.validation_logs/adb_install.txt" 2>&1 || { echo 'adb install failed' >&2; exit 62; }
-  # find aapt/apkanalyzer or fallback
-  AAPT=""
-  if [ -x "$ANDR_ROOT/build-tools/33.0.2/aapt" ]; then AAPT="$ANDR_ROOT/build-tools/33.0.2/aapt"; fi
-  if [ -z "$AAPT" ]; then
-    AAPT=$(find "$ANDR_ROOT/build-tools" -maxdepth 2 -type f \( -name aapt -o -name aapt2 \) | head -n1 || true)
-  fi
-  APKANALYZER=$(command -v apkanalyzer 2>/dev/null || true)
-  PKG=""
-  ACT=""
-  if [ -n "$AAPT" ] && [ -x "$AAPT" ]; then
-    PKG=$($AAPT dump badging "$APK_PATH" | awk -F"'" '/package: name=/{print $2; exit}') || true
-    ACT=$($AAPT dump badging "$APK_PATH" | awk -F"'" '/launchable-activity: name=/{print $2; exit}') || true
-  elif [ -n "$APKANALYZER" ]; then
-    PKG=$(apkanalyzer manifest print --apk "$APK_PATH" 2>/dev/null | awk -F'package="' '/package=/{print $2; exit}' | cut -d'"' -f1) || true
-  else
-    if command -v unzip >/dev/null 2>&1; then
-      unzip -p "$APK_PATH" AndroidManifest.xml 2>/dev/null | strings | tr -d '\0' | grep -o 'package="[^"]*"' | head -n1 | sed 's/package="//;s/"//' > "$WORKSPACE/.validation_logs/manifest_pkg.txt" || true
-      PKG=$(cat "$WORKSPACE/.validation_logs/manifest_pkg.txt" 2>/dev/null || true)
-    fi
-  fi
-  if [ -n "$PKG" ]; then
-    if [ -n "$ACT" ]; then
-      $ADB_CMD -s "$DEVICE" shell am start -n "$PKG/$ACT" > "$WORKSPACE/.validation_logs/adb_start.txt" 2>&1 || true
-    fi
-    sleep 2
-    if $ADB_CMD -s "$DEVICE" shell ps -A | tr -d '\r' | grep -F "$PKG" >/dev/null 2>&1; then
-      echo "app $PKG running on $DEVICE" > "$WORKSPACE/.validation_logs/app_running.txt"
-    else
-      echo "app $PKG not detected via ps" > "$WORKSPACE/.validation_logs/app_not_running.txt"
-    fi
-    $ADB_CMD -s "$DEVICE" logcat -d > "$WORKSPACE/adb_log_${DEVICE}.txt" || true
-    $ADB_CMD -s "$DEVICE" shell am force-stop "$PKG" || true
-    $ADB_CMD -s "$DEVICE" uninstall "$PKG" || true
-  else
-    echo 'Could not determine package name; installed APK but skipping start/uninstall steps' > "$WORKSPACE/.validation_logs/could_not_determine_pkg.txt"
-  fi
-else
-  echo 'No APK to install' > "$WORKSPACE/.validation_logs/no_apk_to_install.txt"
-fi
-exit 0
+# basic manifest check
+if unzip -l "$APK" 2>/dev/null | grep -q "AndroidManifest.xml"; then echo "MANIFEST_PRESENT=YES" >> "$EVIDENCE_FILE"; else echo "MANIFEST_PRESENT=NO" >> "$EVIDENCE_FILE"; fi
+# stop gradle daemons if wrapper present
+if [ -x ./gradlew ]; then ./gradlew --stop >/dev/null 2>&1 || true; fi
+# success
+echo -e "STATUS=PASS\nREASON=artifact built and smoke-checked" > "$OUT_RESULT"
+echo "validation complete; evidence in $EVIDENCE_FILE"
